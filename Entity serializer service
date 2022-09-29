@@ -1,0 +1,122 @@
+<?php
+
+namespace App\Service;
+
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Doctrine\ORM\Mapping\MappingException;
+use Doctrine\ORM\PersistentCollection;
+
+class EntitySerializerService
+{
+    private $em;
+
+    public function __construct(EntityManagerInterface $em)
+    {
+        $this->em = $em;
+    }
+
+    /**
+     * Serialaize entity and send to front
+     *
+     * @param object $entity Entity which needs to be serialized
+     * @param array $fields Fields which needs to be in response array
+     * @param bool $selfRelational also return parents with same fields if entity has self relation
+     * 
+     * @return JsonResponse
+     * 
+     * @throws MappingException when $entity is not actualy entity
+     */
+    public function serialize(object $entity, array $fields, bool $selfRelational = false)
+    {
+        $classMetadata = $this->em->getClassMetadata(get_class($entity));
+        $data = [];
+
+        foreach($fields as $key => $field){
+            if(is_string($key)){
+                $value = $classMetadata->getFieldValue($entity, $key);
+                if($classMetadata->hasAssociation($key)){
+                    $subValues = [];
+                    if($value instanceof PersistentCollection){
+                        $items = $value;
+                        foreach($items as $item){
+                            $associationClassMetadata = $this->em->getClassMetadata(get_class($item));
+                            if(method_exists($item, '__load')){
+                                $item->__load(); // force load associations (when lazy load is enabled)
+                            }
+                            $subValues[] = $this->serialize($item, $field);
+                        }
+                        $data[$key] = $subValues;
+                    }else{
+                        if($selfRelational){
+                            $data[$key] = $this->getSelfRelationalValues($value, $field);
+                            continue;
+                        }
+                        $associationClassMetadata = $this->em->getClassMetadata(get_class($value));
+                        if(method_exists($value, '__load')){
+                            $value->__load(); // force load associations (when lazy load is enabled)
+                        }
+                        foreach($field as $subField){
+                            $subValue = $associationClassMetadata->getFieldValue($value, $subField);
+                            if($associationClassMetadata->hasAssociation($subField)){
+                                $subValue = $subValue ? $subValue->getId() : null;
+                            }
+                            $subValues[$subField] = $subValue;
+                        }
+                        $data[$key] = $subValues;
+                    }
+                    continue;
+                }
+                continue;
+            }
+
+            $value = $classMetadata->getFieldValue($entity, $field);
+            if($classMetadata->hasAssociation($field)){
+                if($value instanceof PersistentCollection){
+                    $items = $value;
+                    $value = [];
+                    foreach($items as $item){
+                        $value[] = $this->serialize($item, ['id']);
+                    }
+                }else{
+                    $value = $value ? $value->getId() : null;
+                }
+            }
+            $data[$field] = $value;
+        }
+
+        return $data;
+    }
+
+    /**
+     * Recursove function which will return self reference relations
+     * 
+     * @param object $entity Entity with self reference
+     * @param array $fields fields array which needs to be returned at each level
+     * 
+     * @return array entity fields with "subarrays" of relations
+     */
+    private function getSelfRelationalValues(object $entity, array $fields)
+    {
+        $associationClassMetadata = $this->em->getClassMetadata(get_class($entity));
+        $subValues = [];
+        if(method_exists($entity, '__load')){
+            $entity->__load(); // force load associations (when lazy load is enabled)
+        }
+        foreach($fields as $subField){
+            $subValue = $associationClassMetadata->getFieldValue($entity, $subField);
+            if (
+                $subValue &&
+                $associationClassMetadata->hasAssociation($subField) &&
+                $associationClassMetadata->getAssociationMappings()[$subField]['targetEntity'] == $associationClassMetadata->getName()
+            ) {
+                $subValue = $this->getSelfRelationalValues($subValue, $fields);
+            } elseif ($associationClassMetadata->hasAssociation($subField)) {
+                $subValue = $subValue ? $subValue->getId() : null;
+            }
+            $subValues[$subField] = $subValue;
+        }
+
+        return $subValues;
+    }
+}
